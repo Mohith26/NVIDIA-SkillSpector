@@ -113,6 +113,32 @@ def _tp4_max_batches_from_environment(value: str | None) -> int:
 
 TP4_MAX_BATCHES = _tp4_max_batches_from_environment(os.environ.get("SKILLSPECTOR_TP4_MAX_BATCHES"))
 
+TP4_MARKDOWN_FENCES_ENV = "SKILLSPECTOR_TP4_MARKDOWN_FENCES"
+_TP4_MARKDOWN_FENCES_ON = frozenset({"1", "true", "yes", "on"})
+_TP4_MARKDOWN_FENCES_OFF = frozenset({"0", "false", "no", "off"})
+
+
+def _tp4_markdown_fences_from_environment(value: str | None) -> bool:
+    """Resolve whether TP4 reviews executable Markdown/text fences.
+
+    Fences are reviewed by default. ``0``, ``false``, ``no`` or ``off`` limit TP4
+    to executable files, as before Markdown fence review existed. Invalid values
+    warn without echoing the supplied text and keep the default.
+    """
+    if value is None or not value.strip():
+        return True
+    normalized = value.strip().casefold()
+    if normalized in _TP4_MARKDOWN_FENCES_ON:
+        return True
+    if normalized in _TP4_MARKDOWN_FENCES_OFF:
+        return False
+    logger.warning(
+        "%s must be one of 1/true/yes/on or 0/false/no/off; reviewing Markdown fences",
+        TP4_MARKDOWN_FENCES_ENV,
+    )
+    return True
+
+
 _CATEGORY = "MCP Tool Poisoning"
 
 
@@ -1192,6 +1218,11 @@ def _tp4_finding(
 def _check_tp4(state: SkillspectorState) -> _TP4CheckOutcome:
     """Run TP4 with per-file, aggregate, token, batch, and shared-time bounds."""
     logger.info("%s: TP4 selected batch capacity=%d", ANALYZER_ID, TP4_MAX_BATCHES)
+    review_markdown_fences = _tp4_markdown_fences_from_environment(
+        os.environ.get(TP4_MARKDOWN_FENCES_ENV)
+    )
+    if not review_markdown_fences:
+        logger.info("%s: TP4 Markdown fence review disabled by configuration", ANALYZER_ID)
     result = _TP4CheckOutcome()
     analyzer: _TP4Analyzer | None = None
     attempted = False
@@ -1255,11 +1286,15 @@ def _check_tp4(state: SkillspectorState) -> _TP4CheckOutcome:
             for metadata in component_metadata
             if isinstance(metadata, dict) and metadata.get("type") in _TP4_EXECUTABLE_TYPES
         }
-        markdown_type_by_path = {
-            str(metadata.get("path")): str(metadata.get("type"))
-            for metadata in component_metadata
-            if isinstance(metadata, dict) and metadata.get("type") in _TP4_MARKDOWN_TYPES
-        }
+        markdown_type_by_path = (
+            {
+                str(metadata.get("path")): str(metadata.get("type"))
+                for metadata in component_metadata
+                if isinstance(metadata, dict) and metadata.get("type") in _TP4_MARKDOWN_TYPES
+            }
+            if review_markdown_fences
+            else {}
+        )
         partial_paths: set[str] = set()
 
         def add_partial_once(event: InspectionLedgerEvent) -> None:

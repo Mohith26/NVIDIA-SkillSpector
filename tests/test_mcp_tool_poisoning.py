@@ -1201,6 +1201,82 @@ class TestTP4MarkdownFences:
         assert [finding.rule_id for finding in result["findings"]].count("TP4") == 1
         assert result["llm_call_log"][0]["ok"] is True
 
+    @pytest.mark.parametrize("value", ["0", "false", "no", "off", " OFF ", "False"])
+    def test_disabled_fence_review_skips_markdown_only_skill(
+        self, monkeypatch: pytest.MonkeyPatch, value: str
+    ):
+        monkeypatch.setenv(mcp_tool_poisoning.TP4_MARKDOWN_FENCES_ENV, value)
+        structured = _mock_tp4_structured_llm(monkeypatch, [{"is_mismatch": True}])
+
+        result = node(_make_state("tp4_markdown_fenced_code", use_llm=True))
+
+        assert structured.calls == 0
+        assert [finding.rule_id for finding in result["findings"]].count("TP4") == 0
+        assert not [
+            event
+            for event in result["inspection_ledger"]
+            if event["phase"] == "semantic" and event["path"] == "SKILL.md"
+        ]
+
+    def test_disabled_fence_review_still_reviews_executable_files(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv(mcp_tool_poisoning.TP4_MARKDOWN_FENCES_ENV, "off")
+        state = {
+            "manifest": {"name": "bounded", "description": "Does local work."},
+            "file_cache": {
+                "tool.py": "print('local')\n",
+                "guide.md": "```python\nprint('documented')\n```\n",
+            },
+            "component_metadata": [
+                {"path": "tool.py", "type": "python"},
+                {"path": "guide.md", "type": "markdown"},
+            ],
+            "use_llm": True,
+            "model_config": {"default": "test-model"},
+        }
+        structured = _mock_tp4_structured_llm(
+            monkeypatch,
+            [{"is_mismatch": True, "confidence": 0.9, "mismatched_capabilities": ["network"]}],
+        )
+
+        result = node(state)
+
+        assert structured.calls == 1
+        assert "### tool.py (python)" in structured.prompts[0]
+        assert "guide.md" not in structured.prompts[0]
+        tp4 = [finding for finding in result["findings"] if finding.rule_id == "TP4"]
+        assert [finding.evidence["code_path"] for finding in tp4] == ["tool.py"]
+        assert all(event["path"] != "guide.md" for event in result["inspection_ledger"])
+
+    @pytest.mark.parametrize("value", [None, "", "  ", "1", "true", "yes", "on", " On "])
+    def test_fence_review_enabled_by_default_and_by_truthy_values(
+        self, monkeypatch: pytest.MonkeyPatch, value: str | None
+    ):
+        if value is None:
+            monkeypatch.delenv(mcp_tool_poisoning.TP4_MARKDOWN_FENCES_ENV, raising=False)
+        else:
+            monkeypatch.setenv(mcp_tool_poisoning.TP4_MARKDOWN_FENCES_ENV, value)
+        structured = _mock_tp4_structured_llm(
+            monkeypatch,
+            [{"is_mismatch": True, "confidence": 0.9, "mismatched_capabilities": ["network"]}],
+        )
+
+        result = node(_make_state("tp4_markdown_fenced_code", use_llm=True))
+
+        assert structured.calls == 1
+        assert [finding.rule_id for finding in result["findings"]].count("TP4") == 1
+
+    @pytest.mark.parametrize("value", ["disable", "2", "nope", "secret\nforged log entry"])
+    def test_invalid_fence_setting_warns_without_echo_and_keeps_review(
+        self, caplog: pytest.LogCaptureFixture, value: str
+    ):
+        with caplog.at_level("WARNING", logger=mcp_tool_poisoning.logger.name):
+            assert mcp_tool_poisoning._tp4_markdown_fences_from_environment(value) is True
+        assert len(caplog.records) == 1
+        assert mcp_tool_poisoning.TP4_MARKDOWN_FENCES_ENV in caplog.text
+        assert value.strip() not in caplog.text
+
     def test_fences_reject_false_positives_and_keep_ranges(self):
         content = (
             "```\nprint('unlabeled')\n```\n"
